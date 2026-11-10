@@ -29,6 +29,7 @@ window.__ModuleLoader__.load({
       'source.desktop-url.txt': '桌面地址文件',
       'source.relay-registry': '固定中继',
       'source.unset': '未配置',
+      'crash.fallback': '桌面地址面板出错了，界面其余部分不受影响。可以直接把地址写进 ~/.dsh/desktop-url.txt（第一行长期地址，第二行点按钮打开的地址）。',
     }
     const en = {
       'action': 'Open desktop DSH',
@@ -52,6 +53,7 @@ window.__ModuleLoader__.load({
       'source.desktop-url.txt': 'address file',
       'source.relay-registry': 'fixed relay',
       'source.unset': 'not configured',
+      'crash.fallback': 'The address panel failed; the rest of the UI is unaffected. Write the address into ~/.dsh/desktop-url.txt instead (line 1 the long-lived origin, line 2 what a click opens).',
     }
 
     /* 18×18 monitor with an out-arrow — same artwork as icon.svg, inlined so
@@ -239,6 +241,48 @@ window.__ModuleLoader__.load({
      * @param read - selector from the store value to the slice worth rendering.
      * @returns the current slice, re-rendering on change.
      */
+    /**
+     * Last line of defence: a render-time throw inside our own tree must not
+     * take the page down with it.
+     *
+     * DSHA runs this UI inside an Android WebView where a React error in a
+     * sidebar item unmounts the whole shell — the user sees a white page while
+     * the app is still alive. Nothing we render is worth that, so both sidebar
+     * items are wrapped: a failure shows one line of text and the address hint
+     * instead, and the rest of the GUI keeps working.
+     */
+    class Boundary extends React.Component {
+      constructor(props) {
+        super(props)
+        this.state = { failed: false, message: '' }
+      }
+
+      static getDerivedStateFromError() {
+        return { failed: true }
+      }
+
+      componentDidCatch(error) {
+        try { console.error('dsha-desktop-link: render failed', error) } catch { /* noop */ }
+      }
+
+      render() {
+        if (!this.state.failed) return this.props.children
+        const t = (this.props && this.props.t) || ((key) => zh[key] || en[key] || key)
+        return h('div', {
+          role: 'alert',
+          style: {
+            padding: '8px 10px',
+            fontSize: 12,
+            lineHeight: 1.45,
+            borderRadius: 8,
+            background: 'var(--dsw-alias-interactive-bg-hover, rgba(127,127,127,.12))',
+            color: 'var(--dsw-alias-label-secondary, inherit)',
+            wordBreak: 'break-word',
+          },
+        }, t('crash.fallback'))
+      }
+    }
+
     function useStore(source, read) {
       const [, force] = React.useState(0)
       React.useEffect(() => source.subscribe(() => force((n) => n + 1)), [source])
@@ -282,7 +326,7 @@ window.__ModuleLoader__.load({
         mintPairUrl().then((url) => { window.location.assign(url || value.desktopUrl) })
       }
 
-      return h('a', {
+      return h(Boundary, { t }, h('a', {
         href: href || undefined,
         target: '_blank',
         rel: 'noopener noreferrer',
@@ -299,7 +343,7 @@ window.__ModuleLoader__.load({
         ? h('span', {
           style: { marginLeft: 8, overflow: 'hidden', textOverflow: 'ellipsis', fontSize: 13 },
         }, t('action.short'))
-        : null)
+        : null))
     }
 
     /**
@@ -312,7 +356,7 @@ window.__ModuleLoader__.load({
     function DesktopLinkSettingsButton(props) {
       const wide = props.wide !== false
       const t = props.t || ((key) => zh[key] || en[key] || key)
-      return h(React.Fragment, null,
+      return h(Boundary, { t }, h(React.Fragment, null,
         h('button', {
           type: 'button',
           style: baseButtonStyle(false),
@@ -322,7 +366,7 @@ window.__ModuleLoader__.load({
           onMouseEnter: hoverIn,
           onMouseLeave: hoverOut,
         }, h(Gear)),
-        h(DesktopLinkSettingsDialog, { t }))
+        h(DesktopLinkSettingsDialog, { t })))
     }
 
     const overlayStyle = {
@@ -332,12 +376,18 @@ window.__ModuleLoader__.load({
       display: 'flex',
       alignItems: 'center',
       justifyContent: 'center',
-      padding: 16,
+      padding: '16px 16px calc(16px + env(safe-area-inset-bottom, 0px))',
       background: 'rgba(0,0,0,.45)',
+      // A soft keyboard shrinks the WebView without moving a fixed overlay;
+      // letting the overlay itself scroll keeps the card reachable on a phone.
+      overflowY: 'auto',
+      overscrollBehavior: 'contain',
+      WebkitOverflowScrolling: 'touch',
     }
     const cardStyle = {
       width: 'min(520px, 100%)',
       maxHeight: 'calc(100vh - 32px)',
+      WebkitMaxHeight: 'calc(100vh - 32px)',
       overflow: 'auto',
       boxSizing: 'border-box',
       padding: 20,
@@ -416,7 +466,7 @@ window.__ModuleLoader__.load({
       if (!open) return null
 
       const submit = (event) => {
-        event.preventDefault()
+        if (event && typeof event.preventDefault === 'function') event.preventDefault()
         if (status === 'saving') return
         setStatus('saving')
         setError('')
@@ -521,23 +571,25 @@ window.__ModuleLoader__.load({
         onClick: () => dialog.hide(),
       }, fallback('form.cancel')),
       h('button', {
-        type: 'submit',
+        type: 'button',
         style: actionStyle(true),
         disabled: status === 'saving',
         onClick: submit,
       }, status === 'saving' ? fallback('form.saving') : fallback('form.save'))))
 
-      return h('div', {
+      // Deliberately not a <form>: an Android WebView treats a submission as a
+      // top-level navigation and hands it to DSHA, and a prevented submit still
+      // costs one navigation attempt. Two plain buttons have no such path.
+      return h(Boundary, { t: fallback }, h('div', {
         role: 'dialog',
         'aria-modal': 'true',
         'aria-label': fallback('form.title'),
         style: overlayStyle,
         onClick: (event) => { if (event.target === event.currentTarget) dialog.hide() },
-      }, h('form', {
-        onSubmit: submit,
+      }, h('div', {
         style: cardStyle,
         onClick: (event) => event.stopPropagation(),
-      }, body))
+      }, body)))
     }
 
     return {

@@ -97,8 +97,37 @@ https://registry.npmjs.org/dsh-desktop-link/-/dsh-desktop-link-1.2.0.tgz
 └─────────────────────────────┘
 ```
 
-保存会写进 `$DSH_HOME/desktop-url.txt`（先写临时文件再 rename，半个文件不会被读走）。
+保存会写进 `$DSH_HOME/desktop-url.txt`（先写临时文件再 rename，半个文件不会被读走；
+rename 被文件系统拒绝时退回直接覆写 —— Android 的 proot rootfs 会这样）。
 两个框都清空 = 删掉该文件，退回自动探测。
+
+这个面板按「绝不可能把页面搞挂」设计：不用 `<form>`（Android WebView 会把提交当成
+一次顶层跳转交给 DSHA），按钮都是 `type="button"`，外层包了一个 error boundary ——
+万一渲染抛错，只在这个位置显示一行说明，侧栏和会话都不受影响。
+
+### 界面坏掉时的兜底（一个网址就能改）
+
+不想点界面、或者界面在某个 WebView 里表现不正常，就直接访问：
+
+```
+http://127.0.0.1:<DSH 端口>/api/desktop-link/set?desktopUrl=https://xxx.dsh-market.com
+http://127.0.0.1:<DSH 端口>/api/desktop-link/set?desktopUrl=https://xxx.dsh-market.com&launchUrl=https://…/open.html?k=…
+```
+
+返回一张「已保存」的小网页，写的还是同一个 `desktop-url.txt`。
+这条路只接受同源请求（`Sec-Fetch-Site: cross-site` 与外站 `Origin` 一律 403），
+地址栏直接输入（没有 Origin）是放行的。
+
+### 在 DSHA 终端里一行搞定
+
+DSHA 有终端，插件的 Host 半区是**每次请求重新读文件**的，所以写文件就等于改配置、
+不用重启：
+
+```sh
+echo 'https://4217332722d23859.dsh-market.com' > ~/.dsh/desktop-url.txt
+```
+
+第一行长长期地址，第二行（可选）是点按钮时打开的地址。
 
 ### 用配置文件
 
@@ -154,8 +183,10 @@ DSH 的远程访问是要配对的。未配对设备直接打开桌面地址会�
 | GET | `/api/desktop-link/info` | `{"ok":true,"launchUrl":"…","desktopUrl":"…","source":"…"}` |
 | POST | `/api/desktop-link/config` | body `{"desktopUrl":"…","launchUrl":"…"}` → 写入 `desktop-url.txt`，返回写入后的解析结果与 `path` |
 
+| GET | `/api/desktop-link/set?desktopUrl=…&launchUrl=…` | 同上，但用查询参数、回一张 HTML 小页面；只要同源 |
+
 POST 只接受 `http(s)` URL：传了非空值但格式不对会返回 `400` 并说明原因，不会静默清空。
-请求体上限 8 KiB，非 `POST` 返回 `405`。
+请求体上限 8 KiB，非 `POST` 返回 `405`；JSON 解析失败时会再试一次 `application/x-www-form-urlencoded`（部分 WebView 会这么发）。
 
 每次请求重新解析地址，所以改配置文件不需要重启。
 另外 Host 半区会在 `webserver/index-inject` 里注入 `globalThis.__DSHA_DESKTOP_LINK__`，让按钮首帧就能拿到地址；全局缺失时 Client 半区回退到上面那个接口。
@@ -189,6 +220,8 @@ locale/{zh,en}.json   meta.title / meta.description
 2. 侧栏折叠成 56px 轨道时只显示图标，展开后才显示「桌面版」文字。
 3. 手机端「点击时铸码」依赖本机装了 `dsh-remote-web-ui`（本插件不声明这个依赖，装不装都能用，只是没有自动铸码）。
 4. 需要 DSH `>= 0.2.1-rc.2`（`webserver/index-inject` 事件与 `sidebar.footer.action` 槽位）。
+5. DSHA 把 DSH 锁在 `0.2.1-rc.2`，那一版**没有** `@deepseek-ai/schemastery`，所以手机上不会出现 DSH 自带的插件设置表单 —— 这正是本插件自带齿轮与 `/set` 路由的原因。
+6. DSHA 的 profile 启动失败时会退到极简 recovery profile（只剩基础界面）；如果界面突然"变回出厂样子"，先看启动日志里 `[DSHA_STARTUP]` 那几行。
 
 ---
 

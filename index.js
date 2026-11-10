@@ -206,6 +206,60 @@ function resolveUrls(config) {
  * @param value - candidate URL.
  * @returns the trimmed URL, or an empty string when it is not http(s).
  */
+/** Minimal HTML escaping for the fallback page. */
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (ch) => (
+    ch === '&' ? '&amp;' : ch === '<' ? '&lt;' : ch === '>' ? '&gt;' : ch === '"' ? '&quot;' : '&#39;'
+  ))
+}
+
+/**
+ * Whether a request came from this origin.
+ *
+ * `/api/desktop-link/set` writes a URL on a bare GET, and registered routes
+ * sit outside the harness's own auth fence — so the check has to be here or any
+ * page on the internet could repoint the user's button with an image tag.
+ * A request typed into the address bar arrives with no Origin and no
+ * `Sec-Fetch-Site`; that is allowed on purpose, because it is the exact case
+ * the fallback page exists for.
+ * @param req - the incoming request.
+ * @returns whether the request is same-origin (or origin-less).
+ */
+function sameOrigin(req) {
+  try {
+    const site = String(req.headers['sec-fetch-site'] ?? '')
+    if (site === 'cross-site') return false
+    const origin = String(req.headers.origin ?? '')
+    if (!origin) return true
+    return new URL(origin).host === String(req.headers.host ?? '')
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Send the fallback page.
+ * @param res - the response.
+ * @param status - HTTP status.
+ * @param title - heading and document title.
+ * @param body - one paragraph of outcome text.
+ */
+function sendPage(res, status, title, body) {
+  const page = `<!doctype html><meta charset="utf-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+    + `<title>${escapeHtml(title)}</title>`
+    + `<body style="font:15px/1.6 system-ui,-apple-system,sans-serif;padding:24px;max-width:720px;color:#222">`
+    + `<h1 style="font-size:18px;margin:0 0 12px">${escapeHtml(title)}</h1>`
+    + `<p style="margin:0 0 16px;word-break:break-all">${escapeHtml(body)}</p>`
+    + `<p style="margin:0"><a href="/" style="color:#4d6bfe">← DSH</a></p></body>`
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(page),
+    'cache-control': 'no-store',
+  })
+  res.end(page)
+}
+
 function cleanUrl(value) {
   return urlish(value)
 }
@@ -235,9 +289,18 @@ function writeUrlFile(desktopUrl, launchUrl) {
     try { rmSync(file, { force: true }) } catch { /* already gone */ }
     return ''
   }
+  const payload = `${lines.join('\n')}\n`
   const tmp = `${file}.tmp`
-  writeFileSync(tmp, `${lines.join('\n')}\n`, { encoding: 'utf8', mode: 0o600 })
-  renameSync(tmp, file)
+  writeFileSync(tmp, payload, { encoding: 'utf8', mode: 0o600 })
+  try {
+    renameSync(tmp, file)
+  } catch {
+    // Android's proot rootfs can refuse a rename across its overlay; a direct
+    // write is not atomic but it still leaves a complete file, which beats a
+    // settings form that can never save.
+    writeFileSync(file, payload, { encoding: 'utf8', mode: 0o600 })
+    try { rmSync(tmp, { force: true }) } catch { /* best effort */ }
+  }
   return file
 }
 
@@ -268,11 +331,20 @@ function readJsonBody(req) {
     })
     req.on('end', () => {
       if (!chunks.length) return finish({})
+      const text = Buffer.concat(chunks).toString('utf8')
       try {
-        const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-        finish(parsed && typeof parsed === 'object' ? parsed : null)
+        const parsed = JSON.parse(text)
+        return finish(parsed && typeof parsed === 'object' ? parsed : null)
       } catch {
-        finish(null)
+        // Some WebViews send a form body even when asked for JSON.
+      }
+      try {
+        const form = new URLSearchParams(text)
+        const out = {}
+        for (const [key, value] of form) out[key] = value
+        return finish(Object.keys(out).length ? out : null)
+      } catch {
+        return finish(null)
       }
     })
     req.on('error', () => finish(null))
@@ -366,7 +438,7 @@ export function apply(ctx, config) {
         res.end(body)
       }
       if (req.method !== 'POST') return reply(405, { ok: false, error: 'POST only' })
-      readJsonBody(req).then((body) => {
+      readJsonBody(req).catch(() => null).then((body) => {
         if (!body) return reply(400, { ok: false, error: 'invalid JSON body' })
         const desktopUrl = cleanUrl(body.desktopUrl)
         const launchUrl = cleanUrl(body.launchUrl)
@@ -389,9 +461,66 @@ export function apply(ctx, config) {
     },
   })
 
+  /**
+   * The no-dialog path.
+   *
+   * Everything the settings panel does, reachable as one URL, so a phone whose
+   * WebView misbehaves — or a user with only a terminal — can still set the
+   * address without touching the sidebar:
+   *
+   *   GET /api/desktop-link/set?desktopUrl=https://xxx.dsh-market.com
+   */
+  const setRoute = ctx.webServer.register({
+    kind: 'exact',
+    path: '/api/desktop-link/set',
+    handler(req, res) {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+        res.end(JSON.stringify({ ok: false, error: 'GET only' }))
+        return
+      }
+      if (!sameOrigin(req)) {
+        sendPage(res, 403, '已拒绝', '这个地址只能从本机页面写入（跨站请求会被拒绝）。')
+        return
+      }
+      let query
+      try {
+        query = new URL(String(req.url ?? '/'), 'http://127.0.0.1').searchParams
+      } catch {
+        sendPage(res, 400, '参数无法解析', '请求地址无法解析，请重新打开一次。')
+        return
+      }
+      const rawDesktop = query.get('desktopUrl') ?? query.get('desktop') ?? ''
+      const rawLaunch = query.get('launchUrl') ?? query.get('launch') ?? ''
+      if (!rawDesktop && !rawLaunch) {
+        sendPage(res, 400, '缺少参数',
+          '用法：/api/desktop-link/set?desktopUrl=https://xxx.dsh-market.com'
+          + '（可再加 &launchUrl=https://…/open.html?k=…）')
+        return
+      }
+      const desktopUrl = cleanUrl(rawDesktop)
+      const launchUrl = cleanUrl(rawLaunch)
+      if ((rawDesktop && !desktopUrl) || (rawLaunch && !launchUrl)) {
+        sendPage(res, 400, '地址不合法', '只接受 http(s) 地址。')
+        return
+      }
+      try {
+        const file = writeUrlFile(desktopUrl, launchUrl)
+        const now = live()
+        sendPage(res, 200, '已保存',
+          `${file ? `已写入 ${file}。` : '已清空地址文件。'}`
+          + `桌面地址：${now.desktopUrl || '（未配置）'}；点按钮打开：${now.launchUrl || '（未配置）'}。`
+          + '回到 DSH 点一下按钮即可。')
+      } catch (error) {
+        sendPage(res, 500, '保存失败', `写入桌面地址文件时出错：${String(error?.message ?? error)}`)
+      }
+    },
+  })
+
   ctx.effect(() => () => {
     if (typeof disposeGlobal === 'function') disposeGlobal()
     if (typeof info === 'function') info()
     if (typeof save === 'function') save()
+    if (typeof setRoute === 'function') setRoute()
   }, 'dsha-desktop-link: info + config routes + index global')
 }

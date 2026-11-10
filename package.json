@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop-link",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "module",
   "icon": "./icon.svg",
   "exports": {
