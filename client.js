@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/dsha-desktop-link',
+  id: 'dsh-desktop-link',
   factory(require) {
     const React = require('react')
     const h = React.createElement

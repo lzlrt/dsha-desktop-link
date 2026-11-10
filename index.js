@@ -1,5 +1,5 @@
 /**
- * @local/dsha-desktop-link —— 宿主半区。
+ * dsh-desktop-link —— 宿主半区。
  *
  * 只做一件事：把两个地址交给浏览器半区。
  * 唯一的路由是一条只读 JSON：
