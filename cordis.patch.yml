@@ -1,0 +1,3 @@
+- insert:
+    - id: dsha-desktop-link
+      name: '@local/dsha-desktop-link'
