@@ -32,17 +32,23 @@ DSHA 的内置浏览器只导航它自己的 `http://127.0.0.1:<端口>`，没�
 
 ## 安装
 
+### 从 npm（推荐）
+
+```sh
+dsh plugin --profile web add dsh-desktop-link
+```
+
 ### 从本仓库（开发循环）
 
 ```sh
-git clone https://github.com/<owner>/dsha-desktop-link
+git clone https://github.com/lzlrt/dsha-desktop-link
 dsh plugin --profile web add link:$(pwd)/dsha-desktop-link
 ```
 
 ### 从打包好的 tgz
 
 ```sh
-dsh plugin --profile web add /path/to/dsha-desktop-link-1.0.0.tgz
+dsh plugin --profile web add /path/to/dsh-desktop-link-1.0.0.tgz
 ```
 
 ### 装到手机上的 DSHA
@@ -50,8 +56,10 @@ dsh plugin --profile web add /path/to/dsha-desktop-link-1.0.0.tgz
 DSHA → 插件 → 添加 → 粘贴一个能下到这个包的 URL，例如：
 
 ```
-https://<任意静态托管>/dsha-desktop-link-1.0.0.tgz
+https://registry.npmjs.org/dsh-desktop-link/-/dsh-desktop-link-1.0.0.tgz
 ```
+
+或在 DSHA 插件页直接填包名 `dsh-desktop-link`。
 
 或从本地导入（`adb push` 到 `/sdcard/Download/` 后在插件页选文件）。
 

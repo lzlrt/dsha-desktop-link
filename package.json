@@ -1,25 +1,29 @@
 {
-  "name": "@local/dsha-desktop-link",
+  "name": "dsh-desktop-link",
   "version": "1.0.0",
-  "private": true,
   "type": "module",
-  "description": "侧栏加一个按钮：一键打开「桌面版 DSH」。手机上由 DSHA 交给系统浏览器，电脑上新标签页打开。",
   "icon": "./icon.svg",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
   },
   "files": [
     "index.js",
     "client.js",
     "cordis.patch.yml",
-    "locale/*.json",
-    "icon.svg"
+    "icon.svg",
+    "locale"
   ],
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "engines": {
+      "dsh": ">=0.2.1-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
@@ -27,5 +31,29 @@
         "@deepseek-ai/dsh-client-ui-sidebar"
       ]
     }
+  },
+  "license": "MIT",
+  "author": "lzlrt",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek",
+    "deepseek-harness",
+    "dsha",
+    "remote",
+    "sidebar",
+    "mobile"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lzlrt/dsha-desktop-link.git"
+  },
+  "homepage": "https://github.com/lzlrt/dsha-desktop-link#readme",
+  "bugs": {
+    "url": "https://github.com/lzlrt/dsha-desktop-link/issues"
+  },
+  "description": "DSH sidebar button: open the desktop DSH Web GUI from DSHA on your phone, in one tap.",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
   }
 }
