@@ -8,6 +8,13 @@
 🖥 →  桌面版
 ```
 
+[![npm](https://img.shields.io/npm/v/dsh-desktop-link?color=cb3837&logo=npm)](https://www.npmjs.com/package/dsh-desktop-link)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+```sh
+dsh plugin --profile web add dsh-desktop-link
+```
+
 ---
 
 ## 它解决什么
