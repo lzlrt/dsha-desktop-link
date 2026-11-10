@@ -15,7 +15,8 @@
     "client.js",
     "cordis.patch.yml",
     "icon.svg",
-    "locale"
+    "locale",
+    "assets"
   ],
   "dsh": {
     "engines": {
