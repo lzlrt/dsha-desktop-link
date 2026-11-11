@@ -153,28 +153,6 @@ function readRelayOrigin() {
   }
 }
 
-/**
- * Whether this instance has ever paired a device.
- *
- * The roster is `dsh-remote-web-ui`'s own persisted store
- * (`$DSH_HOME/remote-web-ui-devices.json`, 0600, its documented default). It is
- * read only for this boolean — no ids, no credentials — and a missing or
- * unreadable file simply means "nothing paired yet", which is the safe answer:
- * the button then mints a token instead of opening a URL that would 401.
- * @returns whether at least one device session exists on disk.
- */
-function hasPairedDevice() {
-  try {
-    const file = join(dshHome(), 'remote-web-ui-devices.json')
-    if (!existsSync(file)) return false
-    const parsed = JSON.parse(readFileSync(file, 'utf8'))
-    const rows = Array.isArray(parsed) ? parsed : (parsed?.devices ?? [])
-    return Array.isArray(rows) ? rows.length > 0 : Boolean(rows && Object.keys(rows).length)
-  } catch {
-    return false
-  }
-}
-
 function resolveUrls(config) {
   const fileUrls = readUrlLines('desktop-url.txt')
   const chain = [
@@ -216,25 +194,70 @@ function escapeHtml(value) {
 /**
  * Whether a request came from this origin.
  *
- * `/api/desktop-link/set` writes a URL on a bare GET, and registered routes
- * sit outside the harness's own auth fence — so the check has to be here or any
- * page on the internet could repoint the user's button with an image tag.
- * A request typed into the address bar arrives with no Origin and no
- * `Sec-Fetch-Site`; that is allowed on purpose, because it is the exact case
- * the fallback page exists for.
+ * Only used when the profile has no Connection service to ask. A request typed
+ * into the address bar arrives with no `Origin`, so an origin-less request is
+ * still allowed — but its `Host` must name this machine, which is what stops a
+ * DNS-rebinding page (that one always sends its own hostname).
  * @param req - the incoming request.
- * @returns whether the request is same-origin (or origin-less).
+ * @returns whether the request is same-origin (or origin-less but loopback-hosted).
  */
 function sameOrigin(req) {
-  try {
-    const site = String(req.headers['sec-fetch-site'] ?? '')
-    if (site === 'cross-site') return false
-    const origin = String(req.headers.origin ?? '')
-    if (!origin) return true
-    return new URL(origin).host === String(req.headers.host ?? '')
-  } catch {
-    return false
+  const headers = req?.headers ?? {}
+  if (String(headers['sec-fetch-site'] ?? '') === 'cross-site') return false
+  const host = String(headers.host ?? '')
+  if (!host) return false
+  const origin = String(headers.origin ?? '')
+  if (origin) {
+    try {
+      return new URL(origin).host === host
+    } catch {
+      return false
+    }
   }
+  return /^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(host)
+}
+
+/**
+ * Apply the harness's own admission check to a route.
+ *
+ * `webServer.register({ kind: 'exact' })` mounts outside the Connection fence —
+ * that fence is applied by the `/api` gateway and by
+ * `ctx.connection.fetch.register` routes only. A plugin route that reads state
+ * (it hands out a pairing key) or writes it (it repoints the launcher) has to
+ * ask for the same treatment, or the only thing standing between the user and a
+ * cross-site write is whichever headers the attacker chose to send.
+ *
+ * `requestRejection()` rejects a request whose `Host`/`Origin` is not this
+ * instance (403) and one with no live peer (401). Without the service we fall
+ * back to `sameOrigin()`, which is weaker — no pairing state — but still pins
+ * Host and Origin.
+ * @param ctx - host plugin context.
+ * @param req - the incoming request.
+ * @returns 0 to admit, otherwise the status to answer with.
+ */
+function rejectionOf(ctx, req) {
+  // `ctx.connection` is only populated when the service was injected; `ctx.get`
+  // reads the same service without that requirement, which is what keeps this
+  // working when a profile loads the plugin before the Connection service.
+  // Reading `ctx.connection` throws when the service was not injected
+  // (`cannot get property "connection" without inject`), so both reads are guarded:
+  // `ctx.get` reads the same service without the inject requirement.
+  let connection
+  try { connection = ctx?.connection } catch { connection = undefined }
+  if (!connection && typeof ctx?.get === 'function') {
+    try { connection = ctx.get('connection') } catch { connection = undefined }
+  }
+  if (connection && typeof connection.requestRejection === 'function') {
+    try {
+      const status = connection.requestRejection(req)
+      if (typeof status === 'number' && status >= 400) return status
+      return 0
+    } catch {
+      // A throwing fence must not become an open door.
+      return 403
+    }
+  }
+  return sameOrigin(req) ? 0 : 403
 }
 
 /**
@@ -336,14 +359,9 @@ function readJsonBody(req) {
         const parsed = JSON.parse(text)
         return finish(parsed && typeof parsed === 'object' ? parsed : null)
       } catch {
-        // Some WebViews send a form body even when asked for JSON.
-      }
-      try {
-        const form = new URLSearchParams(text)
-        const out = {}
-        for (const [key, value] of form) out[key] = value
-        return finish(Object.keys(out).length ? out : null)
-      } catch {
+        // Not JSON. The route refused a non-JSON content type already, so this is
+        // simply a malformed body — and it must not be reparsed as form data,
+        // which is exactly the encoding a cross-site page can send unblocked.
         return finish(null)
       }
     })
@@ -393,7 +411,18 @@ export function apply(ctx, config) {
   const info = ctx.webServer.register({
     kind: 'exact',
     path: '/api/desktop-link/info',
-    handler(_req, res) {
+    handler(req, res) {
+      // `launchUrl` can carry a one-time pairing key, so this route answers only
+      // a request the harness would have admitted itself.
+      const denied = rejectionOf(ctx, req)
+      if (denied) {
+        res.writeHead(denied, {
+          'content-type': 'application/json; charset=utf-8',
+          'cache-control': 'no-store',
+        })
+        res.end(JSON.stringify({ ok: false, error: denied === 401 ? 'unauthenticated' : 'forbidden' }))
+        return
+      }
       // Re-read per request: editing desktop-url.txt (or saving the settings
       // form) takes effect on the next click without restarting the profile.
       // Never let a resolve failure answer with a bare 400 — the button reads
@@ -438,6 +467,16 @@ export function apply(ctx, config) {
         res.end(body)
       }
       if (req.method !== 'POST') return reply(405, { ok: false, error: 'POST only' })
+      const denied = rejectionOf(ctx, req)
+      if (denied) return reply(denied, { ok: false, error: denied === 401 ? 'unauthenticated' : 'forbidden' })
+      // A cross-site page can send a "simple" POST with no preflight only while
+      // the body is text/plain or form-encoded, so JSON-only is the second lock:
+      // reaching this route from another site now needs a preflight, and this
+      // route answers none.
+      const type = String(req.headers['content-type'] ?? '').toLowerCase()
+      if (!type.startsWith('application/json')) {
+        return reply(415, { ok: false, error: 'Content-Type must be application/json' })
+      }
       readJsonBody(req).catch(() => null).then((body) => {
         if (!body) return reply(400, { ok: false, error: 'invalid JSON body' })
         const desktopUrl = cleanUrl(body.desktopUrl)
@@ -477,6 +516,14 @@ export function apply(ctx, config) {
       if (req.method !== 'GET') {
         res.writeHead(405, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
         res.end(JSON.stringify({ ok: false, error: 'GET only' }))
+        return
+      }
+      const denied = rejectionOf(ctx, req)
+      if (denied) {
+        sendPage(res, denied, denied === 401 ? '需要已配对的浏览器' : '已拒绝',
+          denied === 401
+            ? '这个地址要在本机已经配对的浏览器里打开。先在 DSHA 里配对一次，再点这个链接。'
+            : '这个地址只能从本机页面写入（跨站请求会被拒绝）。')
         return
       }
       if (!sameOrigin(req)) {

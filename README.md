@@ -183,10 +183,34 @@ DSH 的远程访问是要配对的。未配对设备直接打开桌面地址会�
 | GET | `/api/desktop-link/info` | `{"ok":true,"launchUrl":"…","desktopUrl":"…","source":"…"}` |
 | POST | `/api/desktop-link/config` | body `{"desktopUrl":"…","launchUrl":"…"}` → 写入 `desktop-url.txt`，返回写入后的解析结果与 `path` |
 
-| GET | `/api/desktop-link/set?desktopUrl=…&launchUrl=…` | 同上，但用查询参数、回一张 HTML 小页面；只要同源 |
+| GET | `/api/desktop-link/set?desktopUrl=…&launchUrl=…` | 同上，但用查询参数、回一张 HTML 小页面 |
 
 POST 只接受 `http(s)` URL：传了非空值但格式不对会返回 `400` 并说明原因，不会静默清空。
-请求体上限 8 KiB，非 `POST` 返回 `405`；JSON 解析失败时会再试一次 `application/x-www-form-urlencoded`（部分 WebView 会这么发）。
+请求体上限 8 KiB，非 `POST` 返回 `405`，**`Content-Type` 不是 `application/json` 返回 `415`**。
+
+---
+
+## 准入：三条路由都过 DSH 自己的围栏
+
+`webServer.register({ kind: 'exact' })` 挂的路由**不在** Connection 围栏之内 —— 真正过围栏的
+只有 `/api` 网关和 `ctx.connection.fetch.register` 注册的精确路由。所以每条 handler 入口都先调
+`ctx.connection.requestRejection(req)`：
+
+| 情况 | 结果 |
+|---|---|
+| `Host` / `Origin` 不是本实例 | `403`（挡 DNS rebinding、挡外站页面） |
+| 没有已配对的会话 | `401`（`/set` 回一张「需要已配对的浏览器」的页面） |
+| 通过 | 照常处理 |
+
+没有 Connection 服务的 profile 会退回到自己的检查：`Sec-Fetch-Site: cross-site` 直接拒，
+带 `Origin` 时要求 host 相同，没有 `Origin`（地址栏直接敲）时要求 `Host` 是本机回环地址
+（`127.0.0.1` / `localhost` / `[::1]`）。弱在没有配对状态，但照样钉死 Host 与 Origin。
+
+`POST /config` 还有第二道锁：只收 `application/json`。跨站页面能免预检发出去的
+「简单请求」只能是 `text/plain` / 表单编码，这条路把它们挡在 415，
+而且**不会**再把非 JSON 的 body 当表单解析。
+
+`GET /info` 也要过围栏，因为 `launchUrl` 里可能带一次性配对密钥（`?k=…`）。
 
 每次请求重新解析地址，所以改配置文件不需要重启。
 另外 Host 半区会在 `webserver/index-inject` 里注入 `globalThis.__DSHA_DESKTOP_LINK__`，让按钮首帧就能拿到地址；全局缺失时 Client 半区回退到上面那个接口。
