@@ -63,10 +63,10 @@ dsh plugin --profile web add /path/to/dsh-desktop-link-1.2.0.tgz
 DSHA → 插件 → 添加 → 粘贴一个能下到这个包的 URL，例如：
 
 ```
-https://registry.npmjs.org/dsh-desktop-link/-/dsh-desktop-link-1.2.0.tgz
+https://registry.npmjs.org/dsh-desktop-link/-/dsh-desktop-link-1.3.0.tgz
 ```
 
-或在 DSHA 插件页直接填包名 `dsh-desktop-link`。
+或在 DSHA 插件页直接填包名 `dsh-desktop-link`（永远装最新版）。
 
 或从本地导入（`adb push` 到 `/sdcard/Download/` 后在插件页选文件）。
 
