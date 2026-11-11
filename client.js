@@ -6,6 +6,8 @@ window.__ModuleLoader__.load({
 
     /** Locale namespace owned by this plugin. */
     const NS = 'dsha-desktop-link'
+    /** Server-rendered settings form — no script, so nothing there can crash a WebView. */
+    const SETTINGS_PATH = '/desktop-link/settings'
 
     const zh = {
       'action': '打开桌面版 DSH',
@@ -312,7 +314,12 @@ window.__ModuleLoader__.load({
       React.useEffect(() => { seed() }, [])
 
       const onClick = (event) => {
-        if (!href) { event.preventDefault(); dialog.show(); return }
+        if (!href) {
+          event.preventDefault()
+          if (isHandset()) window.location.assign(SETTINGS_PATH)
+          else dialog.show()
+          return
+        }
         // Let modifier-clicks and middle-clicks fall through to the anchor.
         if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
         if (!isHandset()) return   // desktop keeps the plain _blank anchor
@@ -352,17 +359,29 @@ window.__ModuleLoader__.load({
      * A separate slot item rather than a modified click on the launcher: a
      * long-press has no affordance on a phone, and a second small target next
      * to the first is the one pattern that reads the same on both platforms.
+     *
+     * On a handset the gear is a plain link to the server-rendered form at
+     * `/desktop-link/settings` — no dialog, no state, no request. The dialog is
+     * kept for the desktop, where it is known to work; the phone gets the page
+     * that cannot take the WebView down with it.
      */
     function DesktopLinkSettingsButton(props) {
       const wide = props.wide !== false
       const t = props.t || ((key) => zh[key] || en[key] || key)
+      const onClick = (event) => {
+        if (!isHandset()) return
+        event.preventDefault()
+        window.location.assign(SETTINGS_PATH)
+      }
       return h(Boundary, { t }, h(React.Fragment, null,
-        h('button', {
-          type: 'button',
+        h('a', {
+          href: SETTINGS_PATH,
+          target: isHandset() ? undefined : '_blank',
+          rel: 'noopener noreferrer',
           style: baseButtonStyle(false),
           title: t('settings'),
           'aria-label': t('settings'),
-          onClick: () => dialog.show(),
+          onClick,
           onMouseEnter: hoverIn,
           onMouseLeave: hoverOut,
         }, h(Gear)),

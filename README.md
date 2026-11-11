@@ -76,24 +76,39 @@ https://registry.npmjs.org/dsh-desktop-link/-/dsh-desktop-link-1.2.0.tgz
 
 ## 配置地址
 
-### 在界面上填（手机推荐）
+### 在界面上填
 
 点侧栏底部那个**齿轮** → 填两个框 → 保存。写盘、立即生效，不用重启、不用碰命令行。
+
+桌面浏览器和手机走的是**两条不同的路**：
+
+| 在哪点 | 打开的是 | 说明 |
+|---|---|---|
+| 桌面浏览器 | 页面内的浮层对话框（React） | 就地改，保存后按钮立刻可用 |
+| 手机（DSHA 的 WebView） | `GET /desktop-link/settings` 的服务端渲染页面 | **纯 HTML 表单，零 JavaScript** |
+
+手机为什么单开一条路：在 DSHA 的 WebView 里点保存会让渲染进程直接退出
+（`onRenderProcessGone`，App 跟着关掉）。同一个操作在桌面浏览器和 `0.2.1-rc.2`
+的普通浏览器里都复现不出来，能确定的只有「手机 WebView + 一次表单提交 + 一次
+React 重渲染」这个组合。所以手机上干脆不给脚本：齿轮是一个普通链接，
+点开就是服务器渲染的一页 HTML，提交是一次最普通的表单 POST，回一张「已保存」。
+那一页没有 React、没有覆盖层、没有软键盘适配问题，也就没有能崩的东西。
 
 ```
 ┌─────────────────────────────┐
 │ 桌面版地址                    │
-│ 填一次就存在这台电脑上，手机和电脑都读同一份。 │
-│ 当前生效（桌面地址文件）：https://…          │
+│ 填好点保存，回到 DSH 点「打开桌面版 DSH」即可。│
+│ 已保存到 /data/.../desktop-url.txt          │
 │                             │
 │ 桌面版地址                    │
 │ [https://xxxx.dsh-market.com] │
-│ 长期地址，留空则自动用固定中继。   │
+│ 长期地址，书签用；留空则回到自动探测的中继地址。│
 │                             │
 │ 点按钮时打开的地址              │
 │ [https://…/open.html?k=…    ] │
-│ 留空就等于上面的地址。          │
-│                   [取消] [保存] │
+│ 一般留空，会和上面一样。         │
+│                   [     保存     ] │
+│ ← 回 DSH                     │
 └─────────────────────────────┘
 ```
 
@@ -101,9 +116,10 @@ https://registry.npmjs.org/dsh-desktop-link/-/dsh-desktop-link-1.2.0.tgz
 rename 被文件系统拒绝时退回直接覆写 —— Android 的 proot rootfs 会这样）。
 两个框都清空 = 删掉该文件，退回自动探测。
 
-这个面板按「绝不可能把页面搞挂」设计：不用 `<form>`（Android WebView 会把提交当成
-一次顶层跳转交给 DSHA），按钮都是 `type="button"`，外层包了一个 error boundary ——
-万一渲染抛错，只在这个位置显示一行说明，侧栏和会话都不受影响。
+设置页的提交带一个**一次性 token**（10 分钟有效，用完即废），所以那张页面被转发、
+被回放都不会重复写盘。桌面的浮层对话框则按「绝不可能把页面搞挂」设计：不用 `<form>`，
+按钮都是 `type="button"`，外层包 error boundary —— 万一渲染抛错，只在这个位置显示
+一行说明，侧栏和会话都不受影响。
 
 ### 界面坏掉时的兜底（一个网址就能改）
 
@@ -184,13 +200,15 @@ DSH 的远程访问是要配对的。未配对设备直接打开桌面地址会�
 | POST | `/api/desktop-link/config` | body `{"desktopUrl":"…","launchUrl":"…"}` → 写入 `desktop-url.txt`，返回写入后的解析结果与 `path` |
 
 | GET | `/api/desktop-link/set?desktopUrl=…&launchUrl=…` | 同上，但用查询参数、回一张 HTML 小页面 |
+| GET | `/desktop-link/settings` | 手机用的设置页（纯 HTML，无 JavaScript，带一次性 token） |
+| POST | `/desktop-link/settings/save` | 表单提交（`application/x-www-form-urlencoded` + 一次性 token）→ 200「已保存」 |
 
 POST 只接受 `http(s)` URL：传了非空值但格式不对会返回 `400` 并说明原因，不会静默清空。
 请求体上限 8 KiB，非 `POST` 返回 `405`，**`Content-Type` 不是 `application/json` 返回 `415`**。
 
 ---
 
-## 准入：三条路由都过 DSH 自己的围栏
+## 准入：所有路由都过 DSH 自己的围栏
 
 `webServer.register({ kind: 'exact' })` 挂的路由**不在** Connection 围栏之内 —— 真正过围栏的
 只有 `/api` 网关和 `ctx.connection.fetch.register` 注册的精确路由。所以每条 handler 入口都先调
@@ -212,6 +230,9 @@ POST 只接受 `http(s)` URL：传了非空值但格式不对会返回 `400` 并
 
 `GET /info` 也要过围栏，因为 `launchUrl` 里可能带一次性配对密钥（`?k=…`）。
 
+`/desktop-link/settings` 两条路由同样先过围栏，并且 POST 只收自己表单发出的
+`application/x-www-form-urlencoded`（别的 `Content-Type` 一律 `415`），外加一次性 token。
+
 每次请求重新解析地址，所以改配置文件不需要重启。
 另外 Host 半区会在 `webserver/index-inject` 里注入 `globalThis.__DSHA_DESKTOP_LINK__`，让按钮首帧就能拿到地址；全局缺失时 Client 半区回退到上面那个接口。
 
@@ -222,8 +243,8 @@ POST 只接受 `http(s)` URL：传了非空值但格式不对会返回 `400` 并
 ```
 package.json          清单：dsh.bundle.patch + dsh.client(platform: web)
 cordis.patch.yml      插入一行 dsha-desktop-link
-index.js              Host 半区：地址解析 + /info + /config + index 全局
-client.js             Client 半区：注册 sidebar.footer.action ×2 + 设置框
+index.js              Host 半区：地址解析 + /info + /config + /set + /desktop-link/settings + index 全局
+client.js             Client 半区：注册 sidebar.footer.action ×2 + 桌面浮层设置框（手机改走设置页链接）
 icon.svg              显示器 + 外跳箭头
 locale/{zh,en}.json   meta.title / meta.description
 ```
@@ -245,6 +266,7 @@ locale/{zh,en}.json   meta.title / meta.description
 3. 手机端「点击时铸码」依赖本机装了 `dsh-remote-web-ui`（本插件不声明这个依赖，装不装都能用，只是没有自动铸码）。
 4. 需要 DSH `>= 0.2.1-rc.2`（`webserver/index-inject` 事件与 `sidebar.footer.action` 槽位）。
 5. DSHA 把 DSH 锁在 `0.2.1-rc.2`，那一版**没有** `@deepseek-ai/schemastery`，所以手机上不会出现 DSH 自带的插件设置表单 —— 这正是本插件自带齿轮与 `/set` 路由的原因。
+7. 手机上的齿轮是**普通链接**，会离开 DSH 的会话界面去 `/desktop-link/settings`；保存后点「← 回 DSH」或直接后退即可回来，会话不丢。
 6. DSHA 的 profile 启动失败时会退到极简 recovery profile（只剩基础界面）；如果界面突然"变回出厂样子"，先看启动日志里 `[DSHA_STARTUP]` 那几行。
 
 ---

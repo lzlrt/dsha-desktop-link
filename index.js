@@ -23,6 +23,7 @@
  * 用来指向 dsha-pair/bridge.py 的 /open.html（每次点都铸一枚新码）。
  * 没配 launchUrl 时，launchUrl 恒等于 desktopUrl。
  */
+import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { homedir } from 'node:os'
@@ -369,6 +370,94 @@ function readJsonBody(req) {
   })
 }
 
+/**
+ * One-shot tokens for the standalone settings form.
+ *
+ * The form has no JavaScript, so it can only send a form-encoded POST — the
+ * exact encoding a cross-site page can also send. The token is what separates
+ * the two: it is minted into the served page, kept in host memory, valid for
+ * ten minutes, and destroyed on first use.
+ */
+const settingsTokens = new Map()
+
+function issueSettingsToken() {
+  const now = Date.now()
+  for (const [key, expiry] of settingsTokens) if (expiry <= now) settingsTokens.delete(key)
+  while (settingsTokens.size >= 32) settingsTokens.delete(settingsTokens.keys().next().value)
+  const token = randomBytes(18).toString('hex')
+  settingsTokens.set(token, now + 10 * 60 * 1000)
+  return token
+}
+
+function consumeSettingsToken(value) {
+  const token = String(value ?? '')
+  const expiry = settingsTokens.get(token)
+  if (expiry === undefined) return false
+  settingsTokens.delete(token)
+  return expiry > Date.now()
+}
+
+function readFormBody(req) {
+  return new Promise((resolveBody) => {
+    const chunks = []
+    let size = 0
+    let settled = false
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      resolveBody(value)
+    }
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > 8192) { finish(null); req.destroy(); return }
+      chunks.push(chunk)
+    })
+    req.on('end', () => finish(new URLSearchParams(Buffer.concat(chunks).toString('utf8'))))
+    req.on('error', () => finish(null))
+  })
+}
+
+/**
+ * The settings page: a plain HTML form with no script at all.
+ *
+ * This exists because a phone WebView can fail on a page that is otherwise
+ * fine — the sidebar dialog renders, and then the whole screen goes away. A
+ * document that never runs JavaScript and never issues a request has nothing in
+ * it that can take the page down.
+ * @param res - the response to write.
+ * @param status - HTTP status.
+ * @param view - `{ token, desktopUrl, launchUrl, notice }`.
+ */
+function sendSettingsPage(res, status, view) {
+  const field = (name, label, hint, value) => `<label style="display:block;margin:0 0 18px">`
+    + `<span style="display:block;font-size:13px;font-weight:600;margin:0 0 6px">${escapeHtml(label)}</span>`
+    + `<input name="${name}" value="${escapeHtml(value)}" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false"`
+    + ` placeholder="https://" style="box-sizing:border-box;width:100%;font:15px/1.4 inherit;padding:11px 12px;border:1px solid #d0d4dd;border-radius:10px;background:#fff;color:#111" />`
+    + `<span style="display:block;font-size:12px;line-height:1.5;opacity:.7;margin:6px 0 0">${escapeHtml(hint)}</span>`
+    + `</label>`
+  const body = `<form method="post" action="/desktop-link/settings/save" style="margin:22px 0 0">`
+    + `<input type="hidden" name="t" value="${escapeHtml(view.token)}" />`
+    + field('desktopUrl', '桌面版地址', '长期地址，书签用；留空则回到自动探测的中继地址。', view.desktopUrl)
+    + field('launchUrl', '点按钮时打开的地址', '一般留空，会和上面一样；填了中转地址就每次点都铸一枚新码。', view.launchUrl)
+    + `<button type="submit" style="width:100%;font:16px/1 inherit;padding:14px 16px;border:0;border-radius:10px;background:#4d6bfe;color:#fff">保存</button>`
+    + `</form>`
+  const page = `<!doctype html><meta charset="utf-8">`
+    + `<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">`
+    + `<title>桌面版地址</title>`
+    + `<body style="font:15px/1.6 system-ui,-apple-system,sans-serif;margin:0;padding:24px 20px 40px;max-width:680px;color:#1a1a1a;background:#f7f8fa">`
+    + `<h1 style="font-size:19px;margin:0 0 8px">桌面版地址</h1>`
+    + `<p style="margin:0;font-size:13px;opacity:.75">填好点保存，回到 DSH 点「打开桌面版 DSH」即可。</p>`
+    + (view.notice ? `<p style="margin:16px 0 0;padding:10px 12px;border-radius:10px;background:#eef2ff;font-size:14px">${escapeHtml(view.notice)}</p>` : '')
+    + body
+    + `<p style="margin:24px 0 0;font-size:13px"><a href="/" style="color:#4d6bfe">← 回 DSH</a></p></body>`
+  res.writeHead(status, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(page),
+    'cache-control': 'no-store',
+  })
+  res.end(page)
+}
+
 /** Host half: publish the desktop address. */
 export const inject = ['webServer']
 
@@ -509,6 +598,116 @@ export function apply(ctx, config) {
    *
    *   GET /api/desktop-link/set?desktopUrl=https://xxx.dsh-market.com
    */
+  /**
+   * The standalone settings page — a form with no JavaScript.
+   *
+   * Reachable as a normal page (not an /api call) so it can be opened directly
+   * in the phone's browser or WebView without the DSH shell:
+   *
+   *   GET /desktop-link/settings
+   */
+  const settingsGet = ctx.webServer.register({
+    kind: 'exact',
+    path: '/desktop-link/settings',
+    handler(req, res) {
+      if (req.method !== 'GET') {
+        res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        res.end('GET only')
+        return
+      }
+      const denied = rejectionOf(ctx, req)
+      if (denied) {
+        sendPage(res, denied, denied === 401 ? '需要已配对的浏览器' : '已拒绝',
+          denied === 401
+            ? '这个页面要在本机已经配对的浏览器里打开。先在 DSHA 里配对一次，再打开这个地址。'
+            : '这个页面只能从本机打开。')
+        return
+      }
+      const current = live()
+      sendSettingsPage(res, 200, {
+        token: issueSettingsToken(),
+        desktopUrl: current.desktopUrl,
+        launchUrl: current.launchUrl,
+        notice: '',
+      })
+    },
+  })
+
+  /** The submit side of that form. */
+  const settingsPost = ctx.webServer.register({
+    kind: 'exact',
+    path: '/desktop-link/settings/save',
+    handler(req, res) {
+      if (req.method !== 'POST') {
+        res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' })
+        res.end('POST only')
+        return
+      }
+      const denied = rejectionOf(ctx, req)
+      if (denied) {
+        sendPage(res, denied, denied === 401 ? '需要已配对的浏览器' : '已拒绝',
+          denied === 401
+            ? '这个页面要在本机已经配对的浏览器里打开。'
+            : '这个页面只能从本机打开。')
+        return
+      }
+      if (!sameOrigin(req)) {
+        sendPage(res, 403, '已拒绝', '这个表单只能从本机页面提交。')
+        return
+      }
+      const type = String(req.headers['content-type'] ?? '').toLowerCase()
+      if (!type.startsWith('application/x-www-form-urlencoded')) {
+        sendPage(res, 415, '提交格式不对', '这个页面只接受自己表单发出的提交。')
+        return
+      }
+      readFormBody(req).then((form) => {
+        if (!form) {
+          sendPage(res, 400, '提交无法解析', '请返回上一页重新提交。')
+          return
+        }
+        const current = live()
+        if (!consumeSettingsToken(form.get('t'))) {
+          sendSettingsPage(res, 403, {
+            token: issueSettingsToken(),
+            desktopUrl: current.desktopUrl,
+            launchUrl: current.launchUrl,
+            notice: '这次提交已过期，请再点一次「保存」。',
+          })
+          return
+        }
+        const rawDesktop = String(form.get('desktopUrl') ?? '').trim()
+        const rawLaunch = String(form.get('launchUrl') ?? '').trim()
+        const desktopUrl = rawDesktop ? cleanUrl(rawDesktop) : ''
+        const launchUrl = rawLaunch ? cleanUrl(rawLaunch) : ''
+        if ((rawDesktop && !desktopUrl) || (rawLaunch && !launchUrl)) {
+          sendSettingsPage(res, 400, {
+            token: issueSettingsToken(),
+            desktopUrl: rawDesktop,
+            launchUrl: rawLaunch,
+            notice: '只接受 http(s) 地址，请检查后重试。',
+          })
+          return
+        }
+        try {
+          const path = writeUrlFile(desktopUrl, launchUrl)
+          sendSettingsPage(res, 200, {
+            token: issueSettingsToken(),
+            desktopUrl: live().desktopUrl,
+            launchUrl: live().launchUrl,
+            notice: path ? `已保存到 ${path}` : '已清空，回到自动探测的中继地址。',
+          })
+        } catch (error) {
+          sendSettingsPage(res, 500, {
+            token: issueSettingsToken(),
+            desktopUrl: rawDesktop,
+            launchUrl: rawLaunch,
+            notice: `写入失败：${String(error?.message ?? error)}`,
+          })
+        }
+      })
+    },
+  })
+
   const setRoute = ctx.webServer.register({
     kind: 'exact',
     path: '/api/desktop-link/set',
@@ -569,5 +768,7 @@ export function apply(ctx, config) {
     if (typeof info === 'function') info()
     if (typeof save === 'function') save()
     if (typeof setRoute === 'function') setRoute()
-  }, 'dsha-desktop-link: info + config routes + index global')
+    if (typeof settingsGet === 'function') settingsGet()
+    if (typeof settingsPost === 'function') settingsPost()
+  }, 'dsha-desktop-link: info + config + set + settings routes + index global')
 }
