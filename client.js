@@ -10,9 +10,9 @@ window.__ModuleLoader__.load({
     const SETTINGS_PATH = '/desktop-link/settings'
 
     const zh = {
-      'action': '打开桌面版 DSH',
-      'action.short': '桌面版',
-      'settings': '填桌面地址',
+      'action': '桌面版 · 新窗口',
+      'action.short': '新窗口',
+      'settings': '桌面版 · 地址',
       'hint.unset': '还没配桌面地址：点右边的齿轮填一个，或把地址写进 ~/.dsh/desktop-url.txt',
       'form.title': '桌面版地址',
       'form.intro': '填一次就存在这台电脑上，手机和电脑都读同一份。',
@@ -34,9 +34,9 @@ window.__ModuleLoader__.load({
       'crash.fallback': '桌面地址面板出错了，界面其余部分不受影响。可以直接把地址写进 ~/.dsh/desktop-url.txt（第一行长期地址，第二行点按钮打开的地址）。',
     }
     const en = {
-      'action': 'Open desktop DSH',
-      'action.short': 'Desktop',
-      'settings': 'Set desktop address',
+      'action': 'Desktop · new window',
+      'action.short': 'New window',
+      'settings': 'Desktop · address',
       'hint.unset': 'No desktop address yet: click the gear to set one, or write it into ~/.dsh/desktop-url.txt',
       'form.title': 'Desktop address',
       'form.intro': 'Saved on this computer once; both the phone and the desktop read it.',
